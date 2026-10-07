@@ -155,16 +155,32 @@ if old_check in main_text:
     main_text = main_text.replace(old_check, "true")
 
 old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
-new_intent = old_intent + """
+if old_intent not in main_text:
+    raise SystemExit("managed-profile provisioning intent was not found")
+
+# The source app may already provide the device-admin component. Add the
+# Android 13+ offline flag independently so one existing extra cannot prevent
+# the other from being inserted.
+if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
+    main_text = main_text.replace(
+        old_intent,
+        old_intent + """
                             i.putExtra(
                                 DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME,
                                 android.content.ComponentName(this, TwinDeviceAdminReceiver::class.java)
-                            )
+                            )""",
+        1,
+    )
+
+if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
+    main_text = main_text.replace(
+        old_intent,
+        old_intent + """
                             if (android.os.Build.VERSION.SDK_INT >= 33) {
                                 i.putExtra(DevicePolicyManager.EXTRA_PROVISIONING_ALLOW_OFFLINE, true)
-                            }"""
-if old_intent in main_text and "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
-    main_text = main_text.replace(old_intent, new_intent, 1)
+                            }""",
+        1,
+    )
 
 if old_check in main_text:
     raise SystemExit("managed-profile provisioning gate was not patched")
