@@ -8,6 +8,8 @@ Goal: Twin is intended to provide "two of everything" by creating isolated app s
 
 ## 2. Current state
 
+The original `twin.zip` project archive used as the starting project was created by Claude and was subsequently uploaded/provided for this workflow. The current CI process extracts that archive, creates the Flutter build project, restores the native Android files, and applies the provisioning patch before compiling.
+
 The GitHub Actions Android build is working.
 
 Latest successful commit:
