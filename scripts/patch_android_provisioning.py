@@ -1,8 +1,16 @@
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+# This step runs after the workflow has restored the native files into the
+# generated Flutter Android project. Patch the files that Gradle actually builds.
 root = Path(".")
-(root / "kotlin/GetProvisioningModeActivity.kt").write_text("""package com.example.twin
+android_root = root / "android/app/src/main"
+kotlin_dir = android_root / "kotlin/com/example/twin"
+res_xml = android_root / "res/xml"
+kotlin_dir.mkdir(parents=True, exist_ok=True)
+res_xml.mkdir(parents=True, exist_ok=True)
+
+(kotlin_dir / "GetProvisioningModeActivity.kt").write_text("""package com.example.twin
 
 import android.app.Activity
 import android.app.admin.DevicePolicyManager
@@ -30,7 +38,7 @@ class GetProvisioningModeActivity : Activity() {
 }
 """)
 
-(root / "kotlin/PolicyComplianceActivity.kt").write_text("""package com.example.twin
+(kotlin_dir / "PolicyComplianceActivity.kt").write_text("""package com.example.twin
 
 import android.app.Activity
 import android.os.Bundle
@@ -44,7 +52,9 @@ class PolicyComplianceActivity : Activity() {
 }
 """)
 
-(root / "kotlin/ProvisionActivity.kt").write_text("""package com.example.twin
+# Keep this class only as a non-provisioning placeholder. The system
+# ManagedProvisioning component owns ACTION_PROVISION_MANAGED_PROFILE.
+(kotlin_dir / "ProvisionActivity.kt").write_text("""package com.example.twin
 
 import android.app.Activity
 import android.os.Bundle
@@ -58,27 +68,26 @@ class ProvisionActivity : Activity() {
 }
 """)
 
-(root / "kotlin/TwinDeviceAdminReceiver.kt").write_text("""package com.example.twin
+(kotlin_dir / "TwinDeviceAdminReceiver.kt").write_text("""package com.example.twin
 
 import android.app.admin.DeviceAdminReceiver
 
 class TwinDeviceAdminReceiver : DeviceAdminReceiver()
 """)
 
-manifest = root / "AndroidManifest.xml"
+manifest = android_root / "AndroidManifest.xml"
 ns = "http://schemas.android.com/apk/res/android"
 ET.register_namespace("android", ns)
 tree = ET.parse(manifest)
 m = tree.getroot()
 app = m.find("application")
 if app is None:
-    raise SystemExit("AndroidManifest.xml has no <application>")
+    raise SystemExit("generated AndroidManifest.xml has no <application>")
 
 def attr(node, name):
     return node.get("{" + ns + "}" + name)
 
-# The provisioning launcher must not be claimed by the DPC. Android's
-# ManagedProvisioning component owns ACTION_PROVISION_MANAGED_PROFILE.
+# Do not let Twin claim ACTION_PROVISION_MANAGED_PROFILE.
 for n in list(app.findall("activity")):
     if attr(n, "name") in (".ProvisionActivity", "com.example.twin.ProvisionActivity"):
         app.remove(n)
@@ -102,14 +111,8 @@ def ensure_activity(name, action):
     c = ET.SubElement(filt, "category")
     c.set("{" + ns + "}name", "android.intent.category.DEFAULT")
 
-ensure_activity(
-    "GetProvisioningModeActivity",
-    "android.app.action.GET_PROVISIONING_MODE",
-)
-ensure_activity(
-    "PolicyComplianceActivity",
-    "android.app.action.ADMIN_POLICY_COMPLIANCE",
-)
+ensure_activity("GetProvisioningModeActivity", "android.app.action.GET_PROVISIONING_MODE")
+ensure_activity("PolicyComplianceActivity", "android.app.action.ADMIN_POLICY_COMPLIANCE")
 
 receiver = None
 for n in app.findall("receiver"):
@@ -142,15 +145,17 @@ if md is None:
 md.set("{" + ns + "}name", "android.app.device_admin")
 md.set("{" + ns + "}resource", "@xml/device_admin")
 
-main_activity = root / "kotlin/MainActivity.kt"
-if main_activity.exists():
-    main_text = main_activity.read_text()
-    old_check = "dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
-    if old_check in main_text:
-        main_text = main_text.replace(old_check, "true")
+main_activity = kotlin_dir / "MainActivity.kt"
+if not main_activity.exists():
+    raise SystemExit("generated MainActivity.kt not found")
 
-    old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
-    new_intent = old_intent + """
+main_text = main_activity.read_text()
+old_check = "dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
+if old_check in main_text:
+    main_text = main_text.replace(old_check, "true")
+
+old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
+new_intent = old_intent + """
                             i.putExtra(
                                 DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME,
                                 android.content.ComponentName(this, TwinDeviceAdminReceiver::class.java)
@@ -158,15 +163,15 @@ if main_activity.exists():
                             if (android.os.Build.VERSION.SDK_INT >= 33) {
                                 i.putExtra(DevicePolicyManager.EXTRA_PROVISIONING_ALLOW_OFFLINE, true)
                             }"""
-    if old_intent in main_text and "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
-        main_text = main_text.replace(old_intent, new_intent, 1)
+if old_intent in main_text and "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
+    main_text = main_text.replace(old_intent, new_intent, 1)
 
-    if "isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)" in main_text:
-        raise SystemExit("managed-profile provisioning gate was not patched")
-    if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
-        raise SystemExit("managed-profile admin component extra was not added")
-    if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
-        raise SystemExit("managed-profile offline provisioning extra was not added")
-    main_activity.write_text(main_text)
+if old_check in main_text:
+    raise SystemExit("managed-profile provisioning gate was not patched")
+if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
+    raise SystemExit("managed-profile admin component extra was not added")
+if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
+    raise SystemExit("managed-profile offline provisioning extra was not added")
 
+main_activity.write_text(main_text)
 tree.write(manifest, encoding="utf-8", xml_declaration=True)
