@@ -1,0 +1,58 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+
+      - name: Extract project
+        run: |
+          mkdir -p extracted
+          unzip -o twin.zip -d extracted
+
+      - name: Prepare Flutter project
+        working-directory: extracted/twin/src
+        run: |
+          flutter create . --platforms=android --org com.example --project-name twin
+
+      - name: Restore native Android files
+        working-directory: extracted/twin/src
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/example/twin
+          mkdir -p android/app/src/main/res/xml
+
+          cp lib/main.dart android/app/src/main/
+          cp AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          cp res/xml/device_admin.xml android/app/src/main/res/xml/device_admin.xml
+
+          cp kotlin/*.kt android/app/src/main/kotlin/com/example/twin/
+
+      - name: Get dependencies
+        working-directory: extracted/twin/src
+        run: flutter pub get
+
+      - name: Build APK
+        working-directory: extracted/twin/src
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: twin-release-apk
+          path: extracted/twin/src/build/app/outputs/flutter-apk/app-release.apk
