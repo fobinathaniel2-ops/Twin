@@ -118,4 +118,25 @@ if md is None:
 md.set("{" + ns + "}name", "android.app.device_admin")
 md.set("{" + ns + "}resource", "@xml/device_admin")
 
+main_activity = root / "kotlin/MainActivity.kt"
+if main_activity.exists():
+    main_text = main_activity.read_text()
+    old_check = "dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
+    if old_check in main_text:
+        main_text = main_text.replace(old_check, "true")
+    old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
+    new_intent = old_intent + """
+                            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                                i.putExtra(DevicePolicyManager.EXTRA_PROVISIONING_ALLOW_OFFLINE, true)
+                            }"""
+    if old_intent in main_text and "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
+        main_text = main_text.replace(old_intent, new_intent, 1)
+    if old_check not in f"{old_check}":  # keep script deterministic
+        raise SystemExit("unexpected provisioning check")
+    if "isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)" in main_text:
+        raise SystemExit("managed-profile provisioning gate was not patched")
+    if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
+        raise SystemExit("managed-profile offline provisioning extra was not added")
+    main_activity.write_text(main_text)
+
 tree.write(manifest, encoding="utf-8", xml_declaration=True)
