@@ -151,16 +151,16 @@ if not main_activity.exists():
 
 main_text = main_activity.read_text()
 old_check = "dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
-if old_check in main_text:
-    main_text = main_text.replace(old_check, "true")
+if old_check not in main_text:
+    raise SystemExit("managed-profile provisioning eligibility check was not found")
 
 old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
 if old_intent not in main_text:
     raise SystemExit("managed-profile provisioning intent was not found")
 
-# The source app may already provide the device-admin component. Add the
-# Android 13+ offline flag independently so one existing extra cannot prevent
-# the other from being inserted.
+# The device-admin component is required for managed-profile provisioning.
+# Do not bypass DevicePolicyManager.isProvisioningAllowed(): Android owns
+# the final eligibility decision for the device/user.
 if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
     main_text = main_text.replace(
         old_intent,
@@ -172,22 +172,10 @@ if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
         1,
     )
 
-if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
-    main_text = main_text.replace(
-        old_intent,
-        old_intent + """
-                            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                                i.putExtra(DevicePolicyManager.EXTRA_PROVISIONING_ALLOW_OFFLINE, true)
-                            }""",
-        1,
-    )
-
-if old_check in main_text:
-    raise SystemExit("managed-profile provisioning gate was not patched")
+if old_check not in main_text:
+    raise SystemExit("managed-profile provisioning eligibility check was removed")
 if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
     raise SystemExit("managed-profile admin component extra was not added")
-if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
-    raise SystemExit("managed-profile offline provisioning extra was not added")
 
 main_activity.write_text(main_text)
 tree.write(manifest, encoding="utf-8", xml_declaration=True)
