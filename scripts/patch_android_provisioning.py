@@ -251,10 +251,71 @@ if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
         1,
     )
 
+# Register the fallback activity in the generated manifest.
+sandbox = None
+for n in app.findall("activity"):
+    if attr(n, "name") in (".SandboxActivity", "com.example.twin.SandboxActivity"):
+        sandbox = n
+        break
+if sandbox is None:
+    sandbox = ET.SubElement(app, "activity")
+sandbox.set("{" + ns + "}name", ".SandboxActivity")
+sandbox.set("{" + ns + "}exported", "false")
+
 if old_check not in main_text:
     raise SystemExit("managed-profile provisioning eligibility check was removed")
 if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
     raise SystemExit("managed-profile admin component extra was not added")
+
+# Divert to the fallback before Android provisioning when the OS preflight
+# says that managed-profile provisioning is not allowed.
+intent_pos = main_text.find(old_intent)
+method_pos = main_text.rfind("fun ", 0, intent_pos)
+if method_pos < 0:
+    raise SystemExit("could not locate provisioning method")
+method_open = main_text.find("{", method_pos, intent_pos)
+if method_open < 0:
+    raise SystemExit("could not locate provisioning method body")
+
+guard = """
+        if (!dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)) {
+            startActivity(Intent(this, SandboxActivity::class.java))
+            return
+        }
+"""
+if "startActivity(Intent(this, SandboxActivity::class.java))" not in main_text:
+    main_text = main_text[:method_open + 1] + guard + main_text[method_open + 1:]
+
+# Give the provisioning launch its own request code so a rejected/cancelled
+# system provisioning flow can return to Twin and open the fallback.
+import re
+main_text, count = re.subn(
+    r"startActivityForResult\(i,\s*[^)\n]+\)",
+    "startActivityForResult(i, TWIN_PROVISION_REQUEST_CODE)",
+    main_text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("managed-profile startActivityForResult call was not found")
+
+result_handler = """
+    private companion object {
+        const val TWIN_PROVISION_REQUEST_CODE = 9917
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == TWIN_PROVISION_REQUEST_CODE && resultCode != RESULT_OK) {
+            startActivity(Intent(this, SandboxActivity::class.java))
+        }
+    }
+
+"""
+last_brace = main_text.rfind("}")
+if last_brace < 0:
+    raise SystemExit("could not locate MainActivity class closing brace")
+if "override fun onActivityResult(requestCode: Int" not in main_text:
+    main_text = main_text[:last_brace] + result_handler + main_text[last_brace:]
 
 main_activity.write_text(main_text)
 tree.write(manifest, encoding="utf-8", xml_declaration=True)
