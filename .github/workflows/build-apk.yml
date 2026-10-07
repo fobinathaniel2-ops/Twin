@@ -1,4 +1,5 @@
 name: Build Android APK
+# Managed-profile provisioning patch is applied before the release build.
 
 on:
   push:
