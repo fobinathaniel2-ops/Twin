@@ -10,12 +10,7 @@ res_xml = android_root / "res/xml"
 kotlin_dir.mkdir(parents=True, exist_ok=True)
 res_xml.mkdir(parents=True, exist_ok=True)
 
-# Diagnostic + fallback layer:
-# - Report the Android-managed provisioning state instead of pretending it can be bypassed.
-# - If Android blocks managed-profile provisioning, open a sandbox capability screen.
-#   This does NOT claim to execute arbitrary APKs inside Twin: Android does not expose a
-#   normal-app API for creating OEM clone profiles or running third-party APKs as peers
-#   inside another app. OEM clone profiles are platform-managed.
+# Diagnostics for devices that reject managed-profile provisioning.
 (kotlin_dir / "ProvisioningDiagnostics.kt").write_text("""package com.example.twin
 
 import android.app.admin.DevicePolicyManager
@@ -36,43 +31,20 @@ object ProvisioningDiagnostics {
         val pm = context.packageManager
         val dpm = context.getSystemService(DevicePolicyManager::class.java)
         val um = context.getSystemService(UserManager::class.java)
-        val profiles = try {
-            um.userProfiles.size
-        } catch (_: SecurityException) {
-            1
-        }
-
+        val profiles = try { um.userProfiles.size } catch (_: SecurityException) { 1 }
         return State(
-            managedUsersSupported =
-                pm.hasSystemFeature(PackageManager.FEATURE_MANAGED_USERS),
-            provisioningAllowed =
-                dpm.isProvisioningAllowed(
-                    DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE
-                ),
-            associatedProfiles = profiles,
-            isProfileOwner = dpm.isProfileOwnerApp(context.packageName),
-            isDeviceOwner = dpm.isDeviceOwnerApp(context.packageName)
+            pm.hasSystemFeature(PackageManager.FEATURE_MANAGED_USERS),
+            dpm.isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE),
+            profiles,
+            dpm.isProfileOwnerApp(context.packageName),
+            dpm.isDeviceOwnerApp(context.packageName)
         )
-    }
-
-    fun summary(context: Context): String {
-        val s = read(context)
-        return buildString {
-            append("Managed profiles supported: ")
-            append(if (s.managedUsersSupported) "yes" else "no")
-            append("\\nProvisioning currently allowed: ")
-            append(if (s.provisioningAllowed) "yes" else "no")
-            append("\\nAssociated Android profiles: ")
-            append(s.associatedProfiles)
-            append("\\nTwin profile owner: ")
-            append(if (s.isProfileOwner) "yes" else "no")
-            append("\\nTwin device owner: ")
-            append(if (s.isDeviceOwner) "yes" else "no")
-        }
     }
 }
 """)
 
+# Native sandbox capability screen. It deliberately does not pretend to execute
+# arbitrary third-party APKs inside Twin; Android keeps app sandboxes separate.
 (kotlin_dir / "SandboxActivity.kt").write_text("""package com.example.twin
 
 import android.app.Activity
@@ -84,36 +56,34 @@ import android.widget.TextView
 class SandboxActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        val diagnostics = ProvisioningDiagnostics.read(this)
-        val title = TextView(this).apply {
-            text = "Twin sandbox fallback"
-            textSize = 22f
-            setPadding(48, 48, 48, 24)
-        }
-
-        val body = TextView(this).apply {
+        val s = ProvisioningDiagnostics.read(this)
+        val view = TextView(this).apply {
             textSize = 16f
-            setPadding(48, 8, 48, 48)
+            setPadding(48, 48, 48, 48)
             text = buildString {
-                append("Android is blocking managed-profile creation on this device.\\n\\n")
-                append(ProvisioningDiagnostics.summary(this@SandboxActivity))
+                append("Twin sandbox fallback\\n\\n")
+                append("Managed profiles supported: ")
+                append(if (s.managedUsersSupported) "yes" else "no")
+                append("\\nProvisioning allowed: ")
+                append(if (s.provisioningAllowed) "yes" else "no")
+                append("\\nAssociated profiles: ")
+                append(s.associatedProfiles)
                 append("\\n\\n")
                 if (Build.VERSION.SDK_INT >= 35) {
-                    append("Android exposes clone/private profile types on newer releases, ")
-                    append("but creation and the full clone experience are controlled by ")
-                    append("the system/OEM. Twin cannot safely create one as a normal app.\\n\\n")
+                    append("This Android version defines clone/private profile types, ")
+                    append("but their creation and system integration are controlled by Android/OEM.")
+                } else {
+                    append("No platform clone-profile type is available on this Android version.")
                 }
-                append("Twin will not fake a second Android app environment. The fallback ")
-                append("is a capability/diagnostic screen until a supported profile path ")
-                append("is available.")
+                append("\\n\\n")
+                append("Twin keeps the native work-profile path when Android permits it. ")
+                append("A normal app cannot create a fully isolated peer Android environment ")
+                append("or run an arbitrary APK as a separate app inside its own process.")
             }
         }
-
         setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(title)
-            addView(body)
+            addView(view)
         })
     }
 }
@@ -285,37 +255,6 @@ if old_check not in main_text:
     raise SystemExit("managed-profile provisioning eligibility check was removed")
 if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
     raise SystemExit("managed-profile admin component extra was not added")
-
-# Add a native diagnostic/fallback screen when Android rejects provisioning.
-# Keep the eligibility check itself intact; the OS remains the authority.
-if "Twin sandbox fallback" not in main_text:
-    needle = "if (!" + old_check + ") {"
-    if needle not in main_text:
-        # Be tolerant of whitespace/formatting in the generated source.
-        import re
-        match = re.search(r"if\s*\(!dpm\(\)\.isProvisioningAllowed\(DevicePolicyManager\.ACTION_PROVISION_MANAGED_PROFILE\)\)\s*\{", main_text)
-        if not match:
-            raise SystemExit("managed-profile provisioning branch was not found")
-        start, end = match.span()
-    else:
-        start, end = main_text.index(needle), main_text.index(needle) + len(needle)
-
-    replacement = main_text[start:end] + """
-                            startActivity(Intent(this, SandboxActivity::class.java))
-"""
-    main_text = main_text[:start] + replacement + main_text[end:]
-
-# Ensure the fallback activity is declared.
-ensure_activity_simple = None
-sandbox_node = None
-for n in app.findall("activity"):
-    if attr(n, "name") in (".SandboxActivity", "com.example.twin.SandboxActivity"):
-        sandbox_node = n
-        break
-if sandbox_node is None:
-    sandbox_node = ET.SubElement(app, "activity")
-sandbox_node.set("{" + ns + "}name", ".SandboxActivity")
-sandbox_node.set("{" + ns + "}exported", "false")
 
 main_activity.write_text(main_text)
 tree.write(manifest, encoding="utf-8", xml_declaration=True)
