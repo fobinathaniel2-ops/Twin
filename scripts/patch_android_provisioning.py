@@ -2,41 +2,58 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 root = Path(".")
-(root / "kotlin/ProvisionActivity.kt").write_text("""package com.example.twin
+(root / "kotlin/GetProvisioningModeActivity.kt").write_text("""package com.example.twin
 
 import android.app.Activity
 import android.app.admin.DevicePolicyManager
 import android.content.Intent
 import android.os.Bundle
 
+class GetProvisioningModeActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val allowed = intent?.getIntegerArrayListExtra(
+            DevicePolicyManager.EXTRA_PROVISIONING_ALLOWED_PROVISIONING_MODES
+        )
+        val mode = DevicePolicyManager.PROVISIONING_MODE_MANAGED_PROFILE
+        if (allowed != null && !allowed.contains(mode)) {
+            setResult(RESULT_CANCELED)
+            finish()
+            return
+        }
+        setResult(
+            RESULT_OK,
+            Intent().putExtra(DevicePolicyManager.EXTRA_PROVISIONING_MODE, mode)
+        )
+        finish()
+    }
+}
+""")
+
+(root / "kotlin/PolicyComplianceActivity.kt").write_text("""package com.example.twin
+
+import android.app.Activity
+import android.os.Bundle
+
+class PolicyComplianceActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setResult(RESULT_OK)
+        finish()
+    }
+}
+""")
+
+(root / "kotlin/ProvisionActivity.kt").write_text("""package com.example.twin
+
+import android.app.Activity
+import android.os.Bundle
+
 class ProvisionActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        when (intent?.action) {
-            DevicePolicyManager.ACTION_GET_PROVISIONING_MODE -> {
-                val result = Intent().apply {
-                    putExtra(
-                        DevicePolicyManager.EXTRA_PROVISIONING_MODE,
-                        DevicePolicyManager.PROVISIONING_MODE_MANAGED_PROFILE
-                    )
-                }
-                setResult(RESULT_OK, result)
-                finish()
-            }
-            DevicePolicyManager.ACTION_ADMIN_POLICY_COMPLIANCE -> {
-                setResult(RESULT_OK)
-                finish()
-            }
-            DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE -> {
-                setResult(RESULT_OK)
-                finish()
-            }
-            else -> {
-                setResult(RESULT_CANCELED)
-                finish()
-            }
-        }
+        setResult(RESULT_CANCELED)
+        finish()
     }
 }
 """)
@@ -60,32 +77,39 @@ if app is None:
 def attr(node, name):
     return node.get("{" + ns + "}" + name)
 
-pa = None
-for n in app.findall("activity"):
+# The provisioning launcher must not be claimed by the DPC. Android's
+# ManagedProvisioning component owns ACTION_PROVISION_MANAGED_PROFILE.
+for n in list(app.findall("activity")):
     if attr(n, "name") in (".ProvisionActivity", "com.example.twin.ProvisionActivity"):
-        pa = n
-        break
-if pa is None:
-    pa = ET.SubElement(app, "activity")
-pa.set("{" + ns + "}name", ".ProvisionActivity")
-pa.set("{" + ns + "}exported", "true")
+        app.remove(n)
 
-actions = {
+def ensure_activity(name, action):
+    node = None
+    for n in app.findall("activity"):
+        if attr(n, "name") in ("." + name, "com.example.twin." + name):
+            node = n
+            break
+    if node is None:
+        node = ET.SubElement(app, "activity")
+    node.set("{" + ns + "}name", "." + name)
+    node.set("{" + ns + "}exported", "true")
+    node.set("{" + ns + "}permission", "android.permission.BIND_DEVICE_ADMIN")
+    for filt in list(node.findall("intent-filter")):
+        node.remove(filt)
+    filt = ET.SubElement(node, "intent-filter")
+    a = ET.SubElement(filt, "action")
+    a.set("{" + ns + "}name", action)
+    c = ET.SubElement(filt, "category")
+    c.set("{" + ns + "}name", "android.intent.category.DEFAULT")
+
+ensure_activity(
+    "GetProvisioningModeActivity",
     "android.app.action.GET_PROVISIONING_MODE",
+)
+ensure_activity(
+    "PolicyComplianceActivity",
     "android.app.action.ADMIN_POLICY_COMPLIANCE",
-    "android.app.action.PROVISION_MANAGED_PROFILE",
-}
-found = False
-for filt in pa.findall("intent-filter"):
-    have = {attr(a, "name") for a in filt.findall("action")}
-    if actions.issubset(have):
-        found = True
-        break
-if not found:
-    filt = ET.SubElement(pa, "intent-filter")
-    for action in actions:
-        a = ET.SubElement(filt, "action")
-        a.set("{" + ns + "}name", action)
+)
 
 receiver = None
 for n in app.findall("receiver"):
@@ -95,7 +119,7 @@ for n in app.findall("receiver"):
 if receiver is None:
     receiver = ET.SubElement(app, "receiver")
 receiver.set("{" + ns + "}name", ".TwinDeviceAdminReceiver")
-receiver.set("{" + ns + "}exported", "true")
+receiver.set("{" + ns + "}exported", "false")
 receiver.set("{" + ns + "}permission", "android.permission.BIND_DEVICE_ADMIN")
 
 enabled = any(
@@ -124,17 +148,23 @@ if main_activity.exists():
     old_check = "dpm().isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
     if old_check in main_text:
         main_text = main_text.replace(old_check, "true")
+
     old_intent = "val i = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)"
     new_intent = old_intent + """
+                            i.putExtra(
+                                DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME,
+                                android.content.ComponentName(this, TwinDeviceAdminReceiver::class.java)
+                            )
                             if (android.os.Build.VERSION.SDK_INT >= 33) {
                                 i.putExtra(DevicePolicyManager.EXTRA_PROVISIONING_ALLOW_OFFLINE, true)
                             }"""
-    if old_intent in main_text and "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
+    if old_intent in main_text and "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
         main_text = main_text.replace(old_intent, new_intent, 1)
-    if old_check not in f"{old_check}":  # keep script deterministic
-        raise SystemExit("unexpected provisioning check")
+
     if "isProvisioningAllowed(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE)" in main_text:
         raise SystemExit("managed-profile provisioning gate was not patched")
+    if "EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME" not in main_text:
+        raise SystemExit("managed-profile admin component extra was not added")
     if "EXTRA_PROVISIONING_ALLOW_OFFLINE" not in main_text:
         raise SystemExit("managed-profile offline provisioning extra was not added")
     main_activity.write_text(main_text)
