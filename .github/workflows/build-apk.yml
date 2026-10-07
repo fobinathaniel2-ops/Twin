@@ -27,6 +27,12 @@ jobs:
           mkdir -p extracted
           unzip -o twin.zip -d extracted
 
+      - name: Inspect provisioning source
+        run: |
+          unzip -o twin.zip -d extracted >/dev/null
+          echo "=== provisioning references ==="
+          grep -RInE "canProvision|isProvisioningAllowed|PROVISION_MANAGED_PROFILE|PROVISIONING_ALLOW_OFFLINE" extracted/twin/src --include='*.dart' --include='*.kt' --include='*.java' || true
+
       - name: Prepare Flutter project
         working-directory: extracted/twin/src
         run: |
