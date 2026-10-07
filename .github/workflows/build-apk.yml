@@ -43,6 +43,143 @@ jobs:
 
           cp kotlin/*.kt android/app/src/main/kotlin/com/example/twin/
 
+      - name: Fix Android managed-profile provisioning
+        working-directory: extracted/twin/src
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = Path(".")
+
+          # Android 12+ requires the DPC to answer GET_PROVISIONING_MODE and
+          # ADMIN_POLICY_COMPLIANCE. Keep the legacy provisioning action too.
+          (root / "kotlin/ProvisionActivity.kt").write_text("""package com.example.twin
+
+import android.app.Activity
+import android.app.admin.DevicePolicyManager
+import android.content.Intent
+import android.os.Bundle
+
+class ProvisionActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        when (intent?.action) {
+            DevicePolicyManager.ACTION_GET_PROVISIONING_MODE -> {
+                val result = Intent().apply {
+                    putExtra(
+                        DevicePolicyManager.EXTRA_PROVISIONING_MODE,
+                        DevicePolicyManager.PROVISIONING_MODE_MANAGED_PROFILE
+                    )
+                }
+                setResult(RESULT_OK, result)
+                finish()
+            }
+
+            DevicePolicyManager.ACTION_ADMIN_POLICY_COMPLIANCE -> {
+                setResult(RESULT_OK)
+                finish()
+            }
+
+            DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE -> {
+                setResult(RESULT_OK)
+                finish()
+            }
+
+            else -> {
+                setResult(RESULT_CANCELED)
+                finish()
+            }
+        }
+    }
+}
+""")
+
+          (root / "kotlin/TwinDeviceAdminReceiver.kt").write_text("""package com.example.twin
+
+import android.app.admin.DeviceAdminReceiver
+
+class TwinDeviceAdminReceiver : DeviceAdminReceiver()
+""")
+
+          manifest = root / "AndroidManifest.xml"
+          ns = "http://schemas.android.com/apk/res/android"
+          ET.register_namespace("android", ns)
+          tree = ET.parse(manifest)
+          m = tree.getroot()
+          app = m.find("application")
+          if app is None:
+              raise SystemExit("AndroidManifest.xml has no <application>")
+
+          def attr(node, name):
+              return node.get("{" + ns + "}" + name)
+
+          def find_activity(name):
+              for n in app.findall("activity"):
+                  if attr(n, "name") == name or attr(n, "name") == "." + name:
+                      return n
+              return None
+
+          def ensure_activity(name):
+              n = find_activity(name)
+              if n is None:
+                  n = ET.SubElement(app, "activity")
+                  n.set("{" + ns + "}name", name)
+              n.set("{" + ns + "}exported", "true")
+              return n
+
+          def ensure_action_filter(activity, actions):
+              for filt in activity.findall("intent-filter"):
+                  have = {attr(a, "name") for a in filt.findall("action")}
+                  if set(actions).issubset(have):
+                      return
+              filt = ET.SubElement(activity, "intent-filter")
+              for action in actions:
+                  a = ET.SubElement(filt, "action")
+                  a.set("{" + ns + "}name", action)
+
+          pa = ensure_activity(".ProvisionActivity")
+          ensure_action_filter(pa, [
+              "android.app.action.GET_PROVISIONING_MODE",
+              "android.app.action.ADMIN_POLICY_COMPLIANCE",
+              "android.app.action.PROVISION_MANAGED_PROFILE",
+          ])
+
+          receiver = None
+          for n in app.findall("receiver"):
+              if attr(n, "name") in (".TwinDeviceAdminReceiver", "com.example.twin.TwinDeviceAdminReceiver"):
+                  receiver = n
+                  break
+          if receiver is None:
+              receiver = ET.SubElement(app, "receiver")
+          receiver.set("{" + ns + "}name", ".TwinDeviceAdminReceiver")
+          receiver.set("{" + ns + "}exported", "true")
+          receiver.set("{" + ns + "}permission", "android.permission.BIND_DEVICE_ADMIN")
+
+          has_enabled = False
+          for filt in receiver.findall("intent-filter"):
+              for a in filt.findall("action"):
+                  if attr(a, "name") == "android.app.action.DEVICE_ADMIN_ENABLED":
+                      has_enabled = True
+          if not has_enabled:
+              filt = ET.SubElement(receiver, "intent-filter")
+              a = ET.SubElement(filt, "action")
+              a.set("{" + ns + "}name", "android.app.action.DEVICE_ADMIN_ENABLED")
+
+          md = None
+          for n in receiver.findall("meta-data"):
+              if attr(n, "name") == "android.app.device_admin":
+                  md = n
+                  break
+          if md is None:
+              md = ET.SubElement(receiver, "meta-data")
+          md.set("{" + ns + "}name", "android.app.device_admin")
+          md.set("{" + ns + "}resource", "@xml/device_admin")
+
+          tree.write(manifest, encoding="utf-8", xml_declaration=True)
+          PY
+
       - name: Get dependencies
         working-directory: extracted/twin/src
         run: flutter pub get
